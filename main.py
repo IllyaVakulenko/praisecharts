@@ -4,6 +4,7 @@ import re
 import time
 import argparse
 import requests
+import shutil
 from urllib.parse import urlparse
 from selenium import webdriver
 from selenium.webdriver.common.by import By
@@ -15,20 +16,18 @@ from selenium.common.exceptions import TimeoutException, NoSuchElementException
 try:
     from PIL import Image
 except ImportError:
-    print("Помилка: бібліотека Pillow не встановлена.")
-    print("Будь ласка, встановіть її, виконавши команду: pip install Pillow")
+    print("Error: Pillow library is not installed.")
+    print("Please install it by running: pip install Pillow")
     sys.exit(1)
 
 DOWNLOAD_DIR = 'downloaded_images'
 
 def download_image(url, filepath):
-    """Завантажує зображення та зберігає його за вказаним шляхом."""
     try:
         if os.path.exists(filepath):
-            print(f"Зображення {os.path.basename(filepath)} вже існує. Пропускаємо.")
-            return
+            return # Skip if file already exists
         
-        print(f"Завантаження {url}...")
+        print(f"Downloading {url}...")
         response = requests.get(url, stream=True)
         response.raise_for_status()
         
@@ -37,93 +36,76 @@ def download_image(url, filepath):
         with open(filepath, 'wb') as f:
             for chunk in response.iter_content(chunk_size=8192):
                 f.write(chunk)
-        print(f"Збережено як {filepath}")
+        print(f"Saved as {filepath}")
     except requests.exceptions.RequestException as e:
-        print(f"Помилка завантаження {url}: {e}")
+        print(f"Error downloading {url}: {e}")
 
 def create_pdfs_from_images(arrangement_dir_path):
-    """Створює PDF-файли з зображень у піддиректоріях інструментів."""
-    print("\nСтворення PDF-файлів...")
+    print(f"\nCreating PDFs for arrangement: {os.path.basename(arrangement_dir_path)}...")
     instrument_dirs = [d for d in os.listdir(arrangement_dir_path) if os.path.isdir(os.path.join(arrangement_dir_path, d))]
 
     for instrument in instrument_dirs:
         instrument_path = os.path.join(arrangement_dir_path, instrument)
         images = [f for f in os.listdir(instrument_path) if f.endswith('.png')]
         
-        if not images:
-            continue
+        if not images: continue
 
         images.sort(key=lambda f: int(re.search(r'_(\d{3})\.png$', f).group(1)))
         
         pdf_path = os.path.join(arrangement_dir_path, f"{instrument}.pdf")
-        if os.path.exists(pdf_path):
-            print(f"PDF {os.path.basename(pdf_path)} вже існує. Пропускаємо.")
-            continue
+        if os.path.exists(pdf_path): continue
 
-        print(f"Створення {os.path.basename(pdf_path)}...")
+        print(f"Creating {os.path.basename(pdf_path)}...")
         
         image_objects = []
         try:
             for i, image_name in enumerate(images):
                 img_path = os.path.join(instrument_path, image_name)
                 img = Image.open(img_path).convert('RGB')
-                if i == 0:
-                    first_image = img
-                else:
-                    image_objects.append(img)
+                if i == 0: first_image = img
+                else: image_objects.append(img)
             
             first_image.save(pdf_path, save_all=True, append_images=image_objects)
         except Exception as e:
-            print(f"Не вдалося створити PDF для {instrument}: {e}")
+            print(f"Failed to create PDF for {instrument}: {e}")
 
 def get_path_components(url):
-    """Витягує назву пісні та аранжування з URL, видаляючи зайві частини."""
     try:
         path_parts = urlparse(url).path.strip('/').split('/')
-        id_index = -1
-        for i, part in enumerate(path_parts):
-            if part.isdigit():
-                id_index = i
-                break
+        id_index = next((i for i, part in enumerate(path_parts) if part.isdigit()), -1)
         
         if id_index != -1 and id_index + 1 < len(path_parts):
-            song_slug = path_parts[id_index + 1]
-            song_slug = song_slug.removesuffix('-sheet-music')
-            
-            arrangement_slug = None
-            if id_index + 2 < len(path_parts):
-                arrangement_slug = path_parts[id_index + 2]
+            song_slug = path_parts[id_index + 1].removesuffix('-sheet-music')
+            arrangement_slug = path_parts[id_index + 2] if id_index + 2 < len(path_parts) else None
             return song_slug, arrangement_slug
-    except Exception:
-        pass
-    
-    try:
-        path_parts = urlparse(url).path.strip('/').split('/')
-        song_slug = path_parts[-1] if path_parts else "unknown-song"
-        song_slug = song_slug.removesuffix('-sheet-music')
-        return song_slug, None
-    except:
-        return "unknown-song", None
+    except Exception: pass
+    return "unknown-song", None
+
+def get_arrangement_path(url):
+    song_slug, arrangement_slug = get_path_components(url)
+    if not arrangement_slug:
+        return os.path.join(DOWNLOAD_DIR, song_slug)
+    return os.path.join(DOWNLOAD_DIR, song_slug, arrangement_slug)
+
+def find_next_available_dir(base_path):
+    counter = 1
+    while True:
+        new_path = f"{base_path}_{counter}"
+        if not os.path.exists(new_path):
+            return new_path
+        counter += 1
 
 def get_instrument_from_filename(filename):
-    """Визначає назву інструменту з імені файлу."""
     match = re.search(r'_([a-zA-Z0-9-]+)_(?:[A-Z]|All)_', filename)
-    if match:
-        return match.group(1)
-    return "unknown-instrument"
+    return match.group(1) if match else "unknown-instrument"
 
-def process_url(url):
-    """Виконує повний цикл завантаження та обробки для одного URL."""
-    song_slug, arrangement_slug = get_path_components(url)
+def process_url(url, target_path):
+    """Executes the full download cycle for a single URL to a specified directory."""
+    print(f"Processing: {url}\nTarget directory: {target_path}")
     
-    song_dir = os.path.join(DOWNLOAD_DIR, song_slug)
-    session_dir = os.path.join(song_dir, arrangement_slug) if arrangement_slug else song_dir
-
-    print(f"Назва пісні: {song_slug}")
-    if arrangement_slug:
-        print(f"Аранжування: {arrangement_slug}")
-
-    os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+    if os.path.exists(target_path):
+        print("Deleting existing directory for overwrite...")
+        shutil.rmtree(target_path)
 
     options = FirefoxOptions()
     # options.add_argument("--headless")
@@ -131,116 +113,126 @@ def process_url(url):
     wait = WebDriverWait(driver, 20)
 
     try:
-        print(f"Переходимо на сторінку: {url}")
         driver.get(url)
-
         try:
             cookie_button = WebDriverWait(driver, 5).until(EC.element_to_be_clickable((By.XPATH, "//button[contains(text(), 'Accept') or contains(text(), 'Agree')]")))
-            print("Знайдено кнопку згоди на cookie. Натискаємо..."); cookie_button.click(); time.sleep(2)
-        except TimeoutException:
-            print("Кнопку згоди на cookie не знайдено. Продовжуємо.")
+            cookie_button.click(); time.sleep(2)
+        except TimeoutException: pass
 
-        print("Очікування контейнера...");
         preview_container = wait.until(EC.visibility_of_element_located((By.CSS_SELECTOR, 'app-product-sheet-preview')))
-        print("Контейнер знайдено.")
-
+        
         first_image_element = wait.until(EC.visibility_of_element_located((By.CSS_SELECTOR, '.sheet-wrapper:nth-child(1) img')))
         first_image_url = first_image_element.get_attribute('src')
-        if not first_image_url:
-            print("Не вдалося отримати URL першого зображення."); return
-            
         first_image_filename = os.path.basename(first_image_url.split('?')[0])
+        
         instrument = get_instrument_from_filename(first_image_filename)
-        instrument_dir = os.path.join(session_dir, instrument)
-        download_image(first_image_url, os.path.join(instrument_dir, first_image_filename))
+        download_image(first_image_url, os.path.join(target_path, instrument, first_image_filename))
 
         while True:
             sheet_wrappers = preview_container.find_elements(By.CSS_SELECTOR, '.sheet-wrapper')
-            if len(sheet_wrappers) < 2:
-                print("Другий .sheet-wrapper не знайдено. Завантаження завершено."); break
+            if len(sheet_wrappers) < 2: break
             
             try:
                 second_wrapper = sheet_wrappers[1]
                 second_image_element = second_wrapper.find_element(By.TAG_NAME, 'img')
                 current_image_url = second_image_element.get_attribute('src')
-
-                if not current_image_url:
-                    print("Не вдалося отримати URL поточного зображення. Завершуємо."); break
-
                 current_image_filename = os.path.basename(current_image_url.split('?')[0])
-                if current_image_filename == first_image_filename:
-                    print("Повернулися до першого зображення. Завантаження завершено."); break
+
+                if current_image_filename == first_image_filename: break
 
                 instrument = get_instrument_from_filename(current_image_filename)
-                instrument_dir = os.path.join(session_dir, instrument)
-                download_image(current_image_url, os.path.join(instrument_dir, current_image_filename))
+                download_image(current_image_url, os.path.join(target_path, instrument, current_image_filename))
 
                 next_button = second_wrapper.find_element(By.TAG_NAME, 'button')
                 driver.execute_script("arguments[0].click();", next_button)
-                print(f"Натиснуто 'Next Page' для інструменту: {instrument}")
 
                 wait.until(lambda d: d.find_element(By.CSS_SELECTOR, '.sheet-wrapper:nth-child(2) img').get_attribute('src') != current_image_url)
-                print("Зображення оновилося.")
-
-            except TimeoutException:
-                print("Не вдалося дочекатися оновлення зображення. Завершуємо."); break
-            except NoSuchElementException:
-                print("Наступний елемент не знайдено. Завантаження завершено."); break
-            except Exception as e:
-                print(f"Виникла неочікувана помилка: {e}"); break
-                
-    except TimeoutException:
-        print(f"Час очікування елемента вийшов для URL: {url}")
-    except Exception as e:
-        print(f"Виникла неочікувана помилка для URL {url}: {e}")
+            except (TimeoutException, NoSuchElementException): break
+            except Exception as e: print(f"Error in loop: {e}"); break
     finally:
-        print("Закриваємо браузер.")
         driver.quit()
-        if 'session_dir' in locals() and os.path.exists(session_dir):
-            create_pdfs_from_images(session_dir)
+        if os.path.exists(target_path):
+            create_pdfs_from_images(target_path)
 
 def main():
-    """Головна функція для розбору аргументів та запуску обробки."""
-    parser = argparse.ArgumentParser(
-        description="Завантажує партитури з PraiseCharts.",
-        formatter_class=argparse.RawTextHelpFormatter
-    )
+    parser = argparse.ArgumentParser(description="Downloads sheet music from PraiseCharts.")
     group = parser.add_mutually_exclusive_group(required=True)
-    group.add_argument(
-        '--url', 
-        help="Одне посилання для завантаження."
-    )
-    group.add_argument(
-        '--file', 
-        help="Файл з переліком посилань (одне посилання на рядок).\nРядки, що починаються з #, ігноруються."
-    )
-
+    group.add_argument('--url', help="A single URL to download.")
+    group.add_argument('--file', help="A file containing a list of URLs.")
     args = parser.parse_args()
 
     if args.url:
-        process_url(args.url)
+        target_path = get_arrangement_path(args.url)
+        if os.path.exists(target_path):
+            choice = input(f"Directory '{os.path.relpath(target_path)}' already exists. Your action: [O]verwrite, [N]umber, [S]kip, [Q]uit? ").lower()
+            if choice == 'o':
+                process_url(args.url, target_path)
+            elif choice == 'n':
+                new_path = find_next_available_dir(target_path)
+                process_url(args.url, new_path)
+            elif choice == 'q':
+                sys.exit("Operation cancelled by user.")
+            else:
+                print("Skipping.")
+        else:
+            process_url(args.url, target_path)
     elif args.file:
         try:
             with open(args.file, 'r', encoding='utf-8') as f:
                 urls = [line.strip() for line in f if line.strip() and not line.strip().startswith('#')]
-            
-            total_urls = len(urls)
-            print(f"Знайдено {total_urls} посилань у файлі {args.file}.")
-
-            for i, url in enumerate(urls):
-                print(f"\n--- Обробка посилання {i+1}/{total_urls}: {url} ---")
-                try:
-                    process_url(url)
-                except Exception as e:
-                    print(f"!! Не вдалося обробити {url}: {e}")
-                print(f"--- Завершено обробку посилання {i+1}/{total_urls} ---")
-
         except FileNotFoundError:
-            print(f"Помилка: файл не знайдено за шляхом {args.file}")
-        except Exception as e:
-            print(f"Виникла помилка при читанні файлу: {e}")
-    
-    print("\nРоботу завершено.")
+            sys.exit(f"Error: File not found at {args.file}")
+
+        conflicts = {i: (url, get_arrangement_path(url)) for i, url in enumerate(urls) if os.path.exists(get_arrangement_path(url))}
+        non_conflicts = [(url, get_arrangement_path(url)) for i, url in enumerate(urls) if i not in conflicts]
+        
+        to_overwrite = []
+        to_rename = []
+
+        if conflicts:
+            print("\nFound existing arrangements:")
+            for i, (_, path) in conflicts.items():
+                print(f"  {i+1}. {os.path.relpath(path)}")
+            
+            actions = {'o': ('Overwrite', to_overwrite), 'n': ('Add number', to_rename)}
+            for action_key, (action_text, target_list) in actions.items():
+                if not conflicts: break
+                
+                user_input = input(f"\nEnter numbers for '{action_text}' (space-separated, 'all', or Enter to skip): ")
+                if not user_input: continue
+
+                selected_indices = []
+                if user_input.lower() == 'all':
+                    selected_indices = list(conflicts.keys())
+                else:
+                    try:
+                        selected_indices = [int(n) - 1 for n in user_input.split()]
+                    except ValueError:
+                        print("Invalid input, skipping this action.")
+                        continue
+                
+                moved_indices = []
+                for i in selected_indices:
+                    if i in conflicts:
+                        target_list.append(conflicts[i])
+                        moved_indices.append(i)
+                
+                for i in moved_indices:
+                    del conflicts[i]
+
+        # Execution Phase
+        all_tasks = [('overwrite', to_overwrite), ('rename', to_rename), ('new', non_conflicts)]
+        for task_type, tasks in all_tasks:
+            if not tasks: continue
+            print(f"\n--- Starting processing: {task_type.upper()} ---")
+            for url, path in tasks:
+                final_path = find_next_available_dir(path) if task_type == 'rename' else path
+                try:
+                    process_url(url, final_path)
+                except Exception as e:
+                    print(f"!! Failed to process {url}: {e}")
+
+    print("\nWork complete.")
 
 if __name__ == '__main__':
     main()
