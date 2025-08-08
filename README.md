@@ -66,6 +66,13 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
+Note for Windows PowerShell: if the above activation line does not work in your terminal, try:
+
+```powershell
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+.\.venv\Scripts\Activate.ps1
+```
+
 
 ### Quick Start
 - Single URL:
@@ -133,6 +140,8 @@ Options you’ll see:
 - `--url URL` or positional `URL`: download a single arrangement
 - `--file PATH`: process many URLs from a `.txt` file
 - `--debug`: enable verbose logging (useful for troubleshooting)
+- `--headed`: run browser with a visible window (disable headless)
+- `--outdir PATH`: save outputs under a custom directory (default `charts/`)
 
 
 ### What Gets Downloaded
@@ -216,9 +225,9 @@ Work complete.
   - PDFs are created only when at least one PNG was saved for an instrument.
   - Existing PDFs are not overwritten.
 
-- Run without opening browser (headless)
-  - Advanced users can open `main.py` and uncomment the headless flag for Firefox options:
-    - Look for `# options.add_argument("--headless")` and remove the leading `#`.
+- Browser window
+  - За замовчуванням інструмент працює в headless-режимі (без відкриття вікна).
+  - Щоб побачити браузер, використовуйте прапорець `--headed`.
 
 - Windows console colors look odd
   - Color output is handled by `colorama`; ensure your terminal supports ANSI colors (PowerShell usually does).
@@ -254,7 +263,11 @@ pip install -r requirements.txt
 3) Run in debug mode during development
 
 ```sh
-python main.py --debug --url https://www.praisecharts.com/songs/details/70645/o-holy-night-sheet-music/orchestration
+# headless за замовчуванням
+python main.py --debug --outdir charts --url https://www.praisecharts.com/songs/details/70645/o-holy-night-sheet-music/orchestration
+
+# щоб відкрити вікно браузера
+python main.py --debug --headed --outdir charts --url https://www.praisecharts.com/songs/details/70645/o-holy-night-sheet-music/orchestration
 ```
 
 4) Formatting & linting

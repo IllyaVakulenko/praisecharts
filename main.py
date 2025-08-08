@@ -5,7 +5,7 @@ import argparse
 import shutil
 import logging
 from urllib.parse import urlparse
-from typing import List, Tuple
+from typing import List
 
 try:
     import requests
@@ -55,6 +55,13 @@ class ConsoleUI:
 
 ui = ConsoleUI()
 DOWNLOAD_DIR = 'charts'
+# Controls browser headless mode; set from CLI
+BROWSER_HEADLESS = True
+# Shared HTTP session and headers
+REQUEST_HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36 PraiseChartsDownloader/1.0'
+}
+REQUESTS_SESSION = requests.Session()
 
 def setup_logging(debug_mode):
     log_level = logging.DEBUG if debug_mode else logging.WARNING
@@ -91,21 +98,28 @@ def redirects_to_domain_root(url: str) -> bool:
         if original_path in ("", "/"):
             return False
         try:
-            resp = requests.head(url, allow_redirects=True, timeout=10)
-            if resp.status_code == 405:  # Method not allowed for HEAD
-                resp = requests.get(url, allow_redirects=True, timeout=10, stream=True)
+            # Prefer HEAD; fall back to GET when HEAD is not allowed.
+            with REQUESTS_SESSION.head(url, headers=REQUEST_HEADERS, allow_redirects=True, timeout=10) as head_resp:
+                if head_resp.status_code == 405:
+                    # Use non-streaming GET and ensure connection is closed
+                    with REQUESTS_SESSION.get(url, headers=REQUEST_HEADERS, allow_redirects=True, timeout=10) as get_resp:
+                        final = urlparse(get_resp.url)
+                        final_path = final.path or "/"
+                        if final_path == "/" and original_path != "/":
+                            return True
+                        if getattr(get_resp, "status_code", 200) == 404:
+                            return True
+                        return False
+                final = urlparse(head_resp.url)
+                final_path = final.path or "/"
+                if final_path == "/" and original_path != "/":
+                    return True
+                if getattr(head_resp, "status_code", 200) == 404:
+                    return True
+                return False
         except requests.exceptions.RequestException:
             # If we cannot check, do not block; let downstream handling proceed
             return False
-        final = urlparse(resp.url)
-        final_path = final.path or "/"
-        # If final path collapsed to '/', it's likely a redirect to domain root
-        if final_path == "/" and original_path != "/":
-            return True
-        # Explicit 404 also indicates invalid
-        if getattr(resp, "status_code", 200) == 404:
-            return True
-        return False
     except Exception:
         return False
 
@@ -137,16 +151,16 @@ def download_image(url, filepath):
         if os.path.exists(filepath):
             return
         ui.info(f"Downloading {os.path.basename(filepath)}")
-        response = requests.get(url, stream=True, timeout=20)
-        response.raise_for_status()
-        content_type = response.headers.get('Content-Type', '')
-        if 'image' not in content_type.lower():
-            ui.warning(f"Unexpected content type for {url}: {content_type}")
-            return
-        os.makedirs(os.path.dirname(filepath), exist_ok=True)
-        with open(filepath, 'wb') as f:
-            for chunk in response.iter_content(chunk_size=8192):
-                f.write(chunk)
+        with REQUESTS_SESSION.get(url, headers=REQUEST_HEADERS, stream=True, timeout=20) as response:
+            response.raise_for_status()
+            content_type = response.headers.get('Content-Type', '')
+            if 'image' not in content_type.lower():
+                ui.warning(f"Unexpected content type for {url}: {content_type}")
+                return
+            os.makedirs(os.path.dirname(filepath), exist_ok=True)
+            with open(filepath, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    f.write(chunk)
     except requests.exceptions.RequestException as e:
         ui.error(f"Failed to download {url}: {e}")
     except OSError as e:
@@ -255,7 +269,8 @@ def process_url(url, target_path):
     driver = None
     try:
         options = FirefoxOptions()
-        # options.add_argument("--headless")
+        if BROWSER_HEADLESS:
+            options.add_argument("--headless")
         driver = webdriver.Firefox(options=options)
         wait = WebDriverWait(driver, 10)
 
@@ -319,8 +334,11 @@ def process_url(url, target_path):
             create_pdfs_from_images(target_path)
 
 def main():
+    global DOWNLOAD_DIR, BROWSER_HEADLESS
     parser = argparse.ArgumentParser(description="Downloads sheet music from PraiseCharts.")
     parser.add_argument('--debug', action='store_true', help="Enable detailed debug logging.")
+    parser.add_argument('--headed', action='store_true', help="Run browser with a visible window (disable headless).")
+    parser.add_argument('--outdir', default='charts', help="Output directory for downloads (default: charts)")
     parser.add_argument('url', nargs='?', help="A single URL to download (default mode).")
     parser.add_argument('--url', dest='url', help="A single URL to download (same as positional).")
     parser.add_argument('--file', help="A file containing a list of URLs.")
@@ -328,6 +346,10 @@ def main():
 
     setup_logging(args.debug)
     stats = {'new': 0, 'overwritten': 0, 'renamed': 0, 'skipped': 0, 'errors': 0}
+
+    # Apply CLI configuration
+    DOWNLOAD_DIR = args.outdir or DOWNLOAD_DIR
+    BROWSER_HEADLESS = not bool(args.headed)
 
     if not args.file and not args.url:
         parser.print_help()
@@ -371,6 +393,8 @@ def main():
                 ui.item('-', bad)
             if len(invalid_urls) > 10:
                 ui.info(f"... and {len(invalid_urls) - 10} more")
+            # Count invalid entries as skipped
+            stats['skipped'] += len(invalid_urls)
         if not normalized_urls:
             ui.warning("No valid URLs to process.")
             sys.exit(0)
