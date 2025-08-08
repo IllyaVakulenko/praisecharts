@@ -1,4 +1,5 @@
-/downloaded_images/
+/charts/
+temp/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

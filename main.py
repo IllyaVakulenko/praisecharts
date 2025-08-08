@@ -48,7 +48,7 @@ class ConsoleUI:
         print(f"  {Style.BRIGHT}{index}. {text}")
 
 ui = ConsoleUI()
-DOWNLOAD_DIR = 'downloaded_images'
+DOWNLOAD_DIR = 'charts'
 
 def setup_logging(debug_mode):
     log_level = logging.DEBUG if debug_mode else logging.WARNING
