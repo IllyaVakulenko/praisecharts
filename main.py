@@ -2,23 +2,23 @@ import os
 import sys
 import re
 import argparse
-import requests
 import shutil
 import logging
 from urllib.parse import urlparse
-from selenium import webdriver
-from selenium.webdriver.common.by import By
-from selenium.webdriver.firefox.options import Options as FirefoxOptions
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException, NoSuchElementException
 
 try:
+    import requests
+    from selenium import webdriver
+    from selenium.webdriver.common.by import By
+    from selenium.webdriver.firefox.options import Options as FirefoxOptions
+    from selenium.webdriver.support.ui import WebDriverWait
+    from selenium.webdriver.support import expected_conditions as EC
+    from selenium.common.exceptions import TimeoutException, NoSuchElementException
     from PIL import Image
     from colorama import init, Fore, Style
 except ImportError:
     print("Error: Required libraries are not installed.")
-    print("Please run: pip install Pillow colorama")
+    print("Please run: pip install -r requirements.txt")
     sys.exit(1)
 
 # --- UI/UX Helper Class ---
