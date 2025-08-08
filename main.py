@@ -4,6 +4,7 @@ import re
 import argparse
 import shutil
 import logging
+import atexit
 from urllib.parse import urlparse
 from typing import List
 
@@ -54,16 +55,29 @@ class ConsoleUI:
         print(f"  {Style.BRIGHT}{index}. {text}")
 
 ui = ConsoleUI()
-DOWNLOAD_DIR = 'charts'
-# Controls browser headless mode; set from CLI
+
+# --- Configuration Defaults (production‑ready constants) ---
+DEFAULT_DOWNLOAD_DIR = 'charts'
+HTTP_TIMEOUT_SECONDS = 20
+HTTP_HEAD_TIMEOUT_SECONDS = 10
+REQUEST_CHUNK_BYTES = 8192
+SELENIUM_WAIT_SECONDS = 10
+PAGE_CHANGE_WAIT_SECONDS = 3
+
+# These are set from CLI at runtime
+DOWNLOAD_DIR = DEFAULT_DOWNLOAD_DIR
+# Controls browser headless mode; set from CLI (default: headless)
 BROWSER_HEADLESS = True
+
 # Shared HTTP session and headers
 REQUEST_HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36 PraiseChartsDownloader/1.0'
 }
 REQUESTS_SESSION = requests.Session()
+atexit.register(lambda: REQUESTS_SESSION.close())
 
-def setup_logging(debug_mode):
+def setup_logging(debug_mode: bool) -> None:
+    """Initialize logging with a consistent, production‑friendly format."""
     log_level = logging.DEBUG if debug_mode else logging.WARNING
     logging.basicConfig(level=log_level, format='%(asctime)s %(levelname)-8s [%(filename)s:%(lineno)d] %(message)s')
 
@@ -82,7 +96,6 @@ def normalize_url(raw: str) -> str | None:
         parsed = urlparse(s)
         if not parsed.netloc:
             return None
-        # Basic sanity: avoid spaces
         if any(ch.isspace() for ch in s):
             return None
         return s
@@ -90,7 +103,10 @@ def normalize_url(raw: str) -> str | None:
         return None
 
 def redirects_to_domain_root(url: str) -> bool:
-    """Heuristic: if requesting URL ends up at domain root ('/') while original had a deeper path, treat as invalid link."""
+    """Return True if URL ultimately resolves to domain root '/'; otherwise False.
+
+    Used as a heuristic to skip likely invalid PraiseCharts links that collapse to the homepage.
+    """
     try:
         original = urlparse(url)
         original_path = original.path or "/"
@@ -99,10 +115,20 @@ def redirects_to_domain_root(url: str) -> bool:
             return False
         try:
             # Prefer HEAD; fall back to GET when HEAD is not allowed.
-            with REQUESTS_SESSION.head(url, headers=REQUEST_HEADERS, allow_redirects=True, timeout=10) as head_resp:
+            with REQUESTS_SESSION.head(
+                url,
+                headers=REQUEST_HEADERS,
+                allow_redirects=True,
+                timeout=HTTP_HEAD_TIMEOUT_SECONDS,
+            ) as head_resp:
                 if head_resp.status_code == 405:
                     # Use non-streaming GET and ensure connection is closed
-                    with REQUESTS_SESSION.get(url, headers=REQUEST_HEADERS, allow_redirects=True, timeout=10) as get_resp:
+                    with REQUESTS_SESSION.get(
+                        url,
+                        headers=REQUEST_HEADERS,
+                        allow_redirects=True,
+                        timeout=HTTP_HEAD_TIMEOUT_SECONDS,
+                    ) as get_resp:
                         final = urlparse(get_resp.url)
                         final_path = final.path or "/"
                         if final_path == "/" and original_path != "/":
@@ -146,12 +172,18 @@ def safe_prompt(question: str, default: str = "") -> str:
         ui.warning("No input available; using default response.")
         return default
 
-def download_image(url, filepath):
+def download_image(url: str, filepath: str) -> None:
+    """Download an image to filepath, validating content type and ensuring directories exist."""
     try:
         if os.path.exists(filepath):
             return
         ui.info(f"Downloading {os.path.basename(filepath)}")
-        with REQUESTS_SESSION.get(url, headers=REQUEST_HEADERS, stream=True, timeout=20) as response:
+        with REQUESTS_SESSION.get(
+            url,
+            headers=REQUEST_HEADERS,
+            stream=True,
+            timeout=HTTP_TIMEOUT_SECONDS,
+        ) as response:
             response.raise_for_status()
             content_type = response.headers.get('Content-Type', '')
             if 'image' not in content_type.lower():
@@ -159,14 +191,14 @@ def download_image(url, filepath):
                 return
             os.makedirs(os.path.dirname(filepath), exist_ok=True)
             with open(filepath, 'wb') as f:
-                for chunk in response.iter_content(chunk_size=8192):
+                for chunk in response.iter_content(chunk_size=REQUEST_CHUNK_BYTES):
                     f.write(chunk)
     except requests.exceptions.RequestException as e:
         ui.error(f"Failed to download {url}: {e}")
     except OSError as e:
         ui.error(f"Filesystem error while saving {filepath}: {e}")
 
-def create_pdfs_from_images(arrangement_dir_path):
+def create_pdfs_from_images(arrangement_dir_path: str) -> None:
     if not os.path.isdir(arrangement_dir_path):
         ui.warning(f"Arrangement path is not a directory or does not exist: {arrangement_dir_path}")
         return
@@ -215,7 +247,7 @@ def create_pdfs_from_images(arrangement_dir_path):
             except Exception:
                 pass
 
-def get_path_components(url):
+def get_path_components(url: str) -> tuple[str, str]:
     try:
         path_parts = urlparse(url).path.strip('/').split('/')
         id_index = next((i for i, part in enumerate(path_parts) if part.isdigit()), -1)
@@ -226,22 +258,22 @@ def get_path_components(url):
     except Exception: pass
     return "unknown-song", "unknown-arrangement"
 
-def get_arrangement_path(url):
+def get_arrangement_path(url: str) -> str:
     song_slug, arrangement_slug = get_path_components(url)
     return os.path.join(DOWNLOAD_DIR, song_slug, arrangement_slug)
 
-def find_next_available_dir(base_path):
+def find_next_available_dir(base_path: str) -> str:
     counter = 1
     while True:
         new_path = f"{base_path}_{counter}"
         if not os.path.exists(new_path): return new_path
         counter += 1
 
-def get_instrument_from_filename(filename):
+def get_instrument_from_filename(filename: str) -> str:
     match = re.search(r'_([a-zA-Z0-9-]+)_(?:[A-Z]|All)_', filename)
     return match.group(1) if match else "unknown-instrument"
 
-def process_url(url, target_path):
+def process_url(url: str, target_path: str) -> None:
     normalized = normalize_url(url)
     if not normalized:
         ui.error(f"Invalid URL: {url}")
@@ -272,7 +304,7 @@ def process_url(url, target_path):
         if BROWSER_HEADLESS:
             options.add_argument("--headless")
         driver = webdriver.Firefox(options=options)
-        wait = WebDriverWait(driver, 10)
+        wait = WebDriverWait(driver, SELENIUM_WAIT_SECONDS)
 
         driver.get(normalized)
         spinner_selector = (By.CSS_SELECTOR, '.spinner, .loading, .overlay, .app-spinner')
@@ -313,7 +345,9 @@ def process_url(url, target_path):
                 next_button = second_wrapper.find_element(By.TAG_NAME, 'button')
                 driver.execute_script("arguments[0].click();", next_button)
 
-                WebDriverWait(driver, 3).until(lambda d: d.find_element(By.CSS_SELECTOR, '.sheet-wrapper:nth-child(2) img').get_attribute('src') != current_image_url)
+                WebDriverWait(driver, PAGE_CHANGE_WAIT_SECONDS).until(
+                    lambda d: d.find_element(By.CSS_SELECTOR, '.sheet-wrapper:nth-child(2) img').get_attribute('src') != current_image_url
+                )
             except (TimeoutException, NoSuchElementException):
                 break
             except Exception as e:
@@ -393,7 +427,6 @@ def main():
                 ui.item('-', bad)
             if len(invalid_urls) > 10:
                 ui.info(f"... and {len(invalid_urls) - 10} more")
-            # Count invalid entries as skipped
             stats['skipped'] += len(invalid_urls)
         if not normalized_urls:
             ui.warning("No valid URLs to process.")
