@@ -19,6 +19,7 @@ This README has two parts:
   - [Installation](#installation)
   - [Quick Start](#quick-start)
   - [Usage](#usage)
+    - [Interactive Mode](#interactive-mode)
     - [Single URL](#single-url)
     - [Batch from File](#batch-from-file)
     - [CLI Help](#cli-help)
@@ -27,11 +28,13 @@ This README has two parts:
   - [Interactive Prompts Explained](#interactive-prompts-explained)
   - [Understanding the Summary](#understanding-the-summary)
   - [Troubleshooting](#troubleshooting)
+  - [Building Executables](#building-executables)
 - [For Contributors](#for-contributors)
   - [Project Structure](#project-structure)
   - [Local Development](#local-development)
   - [Code Overview](#code-overview)
   - [Contribution Guidelines](#contribution-guidelines)
+  - [Packaging (Building Executables)](#packaging-building-executables)
   - [Ideas and Improvements](#ideas-and-improvements)
 
 
@@ -92,6 +95,21 @@ The first time you run it, Firefox will open while the tool automatically naviga
 
 ### Usage
 
+#### Interactive Mode
+Run without parameters and the tool will ask for input. It accepts either a PraiseCharts URL or a path to a `.txt` file:
+
+```sh
+python main.py
+# or the packaged exe on Windows
+./dist/praisecharts-downloader.exe
+```
+
+Input rules:
+- If input ends with `.txt` or points to an existing file, it is treated as a file list
+- Else if it starts with `http(s)://` → treated as URL
+- Else if it starts with `www.praisecharts.com/songs/details/` or `praisecharts.com/songs/details/` → treated as URL (scheme is added)
+- Else the tool will complain it cannot determine the type
+
 #### Single URL
 You can pass a URL either positionally or via `--url`:
 
@@ -125,6 +143,8 @@ Run:
 
 ```sh
 python main.py --file temp/links.txt
+# or positionally
+python main.py temp/links.txt
 ```
 
 If any target arrangement folders already exist, you’ll get a “Conflict Resolution” section listing them with numbers. You can choose which ones to overwrite and which ones to “add number” (rename), or skip the rest by pressing Enter. Details in [Interactive Prompts Explained](#interactive-prompts-explained).
@@ -137,8 +157,8 @@ python main.py --help
 ```
 
 Options you’ll see:
-- `--url URL` or positional `URL`: download a single arrangement
-- `--file PATH`: process many URLs from a `.txt` file
+- `--url URL` or positional `URL|PATH`: pass a single PraiseCharts URL or a `.txt` file path
+- `--file PATH`: process many URLs from a `.txt` file (one per line)
 - `--debug`: enable verbose logging (useful for troubleshooting)
 - `--headed`: run browser with a visible window (disable headless)
 - `--outdir PATH`: save outputs under a custom directory (default `charts/`)
@@ -221,6 +241,9 @@ Work complete.
   - Only PraiseCharts song details URLs are supported (must contain `/songs/details/`). Other pages are rejected.
   - Some URLs that redirect to the domain root are treated as invalid.
 
+- Passing a file path but tool treats it like a URL
+  - Ensure it ends with `.txt` or points to an existing file. In interactive mode, files are prioritized ahead of URL detection.
+
 - PDFs not created
   - PDFs are created only when at least one PNG was saved for an instrument.
   - Existing PDFs are not overwritten.
@@ -287,6 +310,36 @@ High‑level flow in `main.py`:
 
 
 ### Contribution Guidelines
+### Packaging (Building Executables)
+
+We support packaging via PyInstaller (simple) and optionally Nuitka (faster runtime, more native feel).
+
+PyInstaller (Windows):
+```powershell
+python -m pip install --upgrade pip pyinstaller
+python -m pip install -r requirements.txt
+pyinstaller --onefile --name praisecharts-downloader main.py
+./dist/praisecharts-downloader.exe --help
+```
+
+PyInstaller (macOS/Linux):
+```bash
+python3 -m pip install --upgrade pip pyinstaller
+python3 -m pip install -r requirements.txt
+pyinstaller --onefile main.py
+./dist/main --help
+```
+
+Notes:
+- Selenium requires Firefox and `geckodriver` to be present on the target system. Put `geckodriver` on PATH or next to the executable.
+- Rebuild after code changes; optionally clean: delete `dist/`, `build/`, and `*.spec` before re-running PyInstaller.
+
+Optional Nuitka (better performance, requires C/C++ toolchain):
+```bash
+python -m pip install nuitka
+python -m nuitka --onefile --standalone main.py
+```
+
 - Fork the repository and create a feature branch from `main`
 - Keep changes focused and small; write clear commit messages
 - Test both single URL and batch modes, including conflict scenarios

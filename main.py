@@ -172,6 +172,41 @@ def safe_prompt(question: str, default: str = "") -> str:
         ui.warning("No input available; using default response.")
         return default
 
+def classify_user_input(raw: str) -> tuple[str | None, str | None]:
+    """Classify user input prioritizing files first (simpler):
+    - If ends with .txt (case-insensitive) OR an existing regular file -> treat as file
+    - Else if starts with http(s):// -> URL
+    - Else if starts with www.praisecharts.com/songs/details/ or praisecharts.com/songs/details/ -> URL
+    - Else if existing directory -> error (expecting a file, not a folder)
+    - Else -> error (cannot determine)
+
+    Returns ("url", normalized_url) or ("file", path) or (None, error_message)
+    """
+    s = (raw or "").strip()
+    if not s:
+        return None, "Empty input."
+    low = s.lower()
+
+    # Prefer file classification first
+    if low.endswith('.txt') or os.path.isfile(s):
+        return "file", s
+    if os.path.isdir(s):
+        return None, f"Provided path is a directory, not a file: {s}"
+
+    # URLs
+    if low.startswith("https://") or low.startswith("http://"):
+        url = normalize_url(s)
+        if url:
+            return "url", url
+        return None, f"Invalid URL: {s}"
+    if low.startswith("www.praisecharts.com/songs/details/") or low.startswith("praisecharts.com/songs/details/"):
+        url = normalize_url(s)
+        if url:
+            return "url", url
+        return None, f"Invalid PraiseCharts URL: {s}"
+
+    return None, "Could not determine if input is a URL or a path to a .txt file."
+
 def download_image(url: str, filepath: str) -> None:
     """Download an image to filepath, validating content type and ensuring directories exist."""
     try:
@@ -373,7 +408,7 @@ def main():
     parser.add_argument('--debug', action='store_true', help="Enable detailed debug logging.")
     parser.add_argument('--headed', action='store_true', help="Run browser with a visible window (disable headless).")
     parser.add_argument('--outdir', default='charts', help="Output directory for downloads (default: charts)")
-    parser.add_argument('url', nargs='?', help="A single URL to download (default mode).")
+    parser.add_argument('url', nargs='?', help="A single URL or a .txt file path (default mode).")
     parser.add_argument('--url', dest='url', help="A single URL to download (same as positional).")
     parser.add_argument('--file', help="A file containing a list of URLs.")
     args = parser.parse_args()
@@ -385,9 +420,30 @@ def main():
     DOWNLOAD_DIR = args.outdir or DOWNLOAD_DIR
     BROWSER_HEADLESS = not bool(args.headed)
 
+    # Reclassify positional input: prefer file if it's a .txt or existing file
+    if args.url and not args.file:
+        kind, value = classify_user_input(args.url)
+        if kind == "file":
+            args.file = value
+            args.url = None
+        elif kind == "url":
+            args.url = value
+        else:
+            # keep original; will fall through to interactive/help if needed
+            pass
+
     if not args.file and not args.url:
-        parser.print_help()
-        sys.exit(2)
+        ui.header("Interactive Mode")
+        user_inp = safe_prompt("Enter PraiseCharts URL or path to a file with URLs:").strip()
+        kind, value = classify_user_input(user_inp)
+        if kind == "url":
+            args.url = value
+        elif kind == "file":
+            args.file = value
+        else:
+            ui.error(value or "Unable to determine input type.")
+            parser.print_help()
+            sys.exit(2)
 
     if args.file and args.url:
         ui.warning("Both --file and --url provided. The --file list will be processed; the single URL will be ignored.")
