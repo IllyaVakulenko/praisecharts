@@ -5,6 +5,7 @@ import argparse
 import shutil
 import logging
 from urllib.parse import urlparse
+from typing import List, Tuple
 
 try:
     import requests
@@ -13,7 +14,12 @@ try:
     from selenium.webdriver.firefox.options import Options as FirefoxOptions
     from selenium.webdriver.support.ui import WebDriverWait
     from selenium.webdriver.support import expected_conditions as EC
-    from selenium.common.exceptions import TimeoutException, NoSuchElementException
+    from selenium.common.exceptions import (
+        TimeoutException,
+        NoSuchElementException,
+        WebDriverException,
+        SessionNotCreatedException,
+    )
     from PIL import Image
     from colorama import init, Fore, Style
 except ImportError:
@@ -54,41 +60,146 @@ def setup_logging(debug_mode):
     log_level = logging.DEBUG if debug_mode else logging.WARNING
     logging.basicConfig(level=log_level, format='%(asctime)s %(levelname)-8s [%(filename)s:%(lineno)d] %(message)s')
 
+def normalize_url(raw: str) -> str | None:
+    """Return a normalized URL. Accepts inputs without scheme like 'praisecharts.com/x'.
+    Returns None if cannot form a valid http(s) URL.
+    """
+    try:
+        if not raw:
+            return None
+        s = raw.strip()
+        if not s:
+            return None
+        if not s.lower().startswith(("http://", "https://")):
+            s = "https://" + s
+        parsed = urlparse(s)
+        if not parsed.netloc:
+            return None
+        # Basic sanity: avoid spaces
+        if any(ch.isspace() for ch in s):
+            return None
+        return s
+    except Exception:
+        return None
+
+def redirects_to_domain_root(url: str) -> bool:
+    """Heuristic: if requesting URL ends up at domain root ('/') while original had a deeper path, treat as invalid link."""
+    try:
+        original = urlparse(url)
+        original_path = original.path or "/"
+        # Only meaningful if original path is deeper than '/'
+        if original_path in ("", "/"):
+            return False
+        try:
+            resp = requests.head(url, allow_redirects=True, timeout=10)
+            if resp.status_code == 405:  # Method not allowed for HEAD
+                resp = requests.get(url, allow_redirects=True, timeout=10, stream=True)
+        except requests.exceptions.RequestException:
+            # If we cannot check, do not block; let downstream handling proceed
+            return False
+        final = urlparse(resp.url)
+        final_path = final.path or "/"
+        # If final path collapsed to '/', it's likely a redirect to domain root
+        if final_path == "/" and original_path != "/":
+            return True
+        # Explicit 404 also indicates invalid
+        if getattr(resp, "status_code", 200) == 404:
+            return True
+        return False
+    except Exception:
+        return False
+
+def is_praisecharts_song_details_url(url: str) -> bool:
+    """Accept only PraiseCharts song details URLs, e.g.,
+    https://www.praisecharts.com/songs/details/<id>/<slug>/..."""
+    try:
+        normalized = normalize_url(url)
+        if not normalized:
+            return False
+        parsed = urlparse(normalized)
+        # accept subdomains (e.g., www)
+        if not parsed.netloc.endswith("praisecharts.com"):
+            return False
+        # require '/songs/details/' in the path
+        return "/songs/details/" in (parsed.path or "")
+    except Exception:
+        return False
+
+def safe_prompt(question: str, default: str = "") -> str:
+    try:
+        return ui.prompt(question)
+    except (EOFError, KeyboardInterrupt):
+        ui.warning("No input available; using default response.")
+        return default
+
 def download_image(url, filepath):
     try:
-        if os.path.exists(filepath): return
+        if os.path.exists(filepath):
+            return
         ui.info(f"Downloading {os.path.basename(filepath)}")
-        response = requests.get(url, stream=True)
+        response = requests.get(url, stream=True, timeout=20)
         response.raise_for_status()
+        content_type = response.headers.get('Content-Type', '')
+        if 'image' not in content_type.lower():
+            ui.warning(f"Unexpected content type for {url}: {content_type}")
+            return
         os.makedirs(os.path.dirname(filepath), exist_ok=True)
         with open(filepath, 'wb') as f:
             for chunk in response.iter_content(chunk_size=8192):
                 f.write(chunk)
     except requests.exceptions.RequestException as e:
         ui.error(f"Failed to download {url}: {e}")
+    except OSError as e:
+        ui.error(f"Filesystem error while saving {filepath}: {e}")
 
 def create_pdfs_from_images(arrangement_dir_path):
+    if not os.path.isdir(arrangement_dir_path):
+        ui.warning(f"Arrangement path is not a directory or does not exist: {arrangement_dir_path}")
+        return
     ui.header(f"Creating PDFs for {os.path.relpath(arrangement_dir_path, DOWNLOAD_DIR)}")
-    instrument_dirs = [d for d in os.listdir(arrangement_dir_path) if os.path.isdir(os.path.join(arrangement_dir_path, d))]
+    try:
+        instrument_dirs = [d for d in os.listdir(arrangement_dir_path) if os.path.isdir(os.path.join(arrangement_dir_path, d))]
+    except OSError as e:
+        ui.error(f"Failed to list directory {arrangement_dir_path}: {e}")
+        return
     for instrument in instrument_dirs:
         instrument_path = os.path.join(arrangement_dir_path, instrument)
-        images = [f for f in os.listdir(instrument_path) if f.endswith('.png')]
-        if not images: continue
-        images.sort(key=lambda f: int(re.search(r'_(\d{3})\.png$', f).group(1)))
+        try:
+            images = [f for f in os.listdir(instrument_path) if os.path.isfile(os.path.join(instrument_path, f)) and f.lower().endswith('.png')]
+        except OSError as e:
+            ui.error(f"Failed to list images in {instrument_path}: {e}")
+            continue
+        if not images:
+            continue
+        def sort_key(filename: str):
+            match = re.search(r'_(\d{3})\.png$', filename, re.IGNORECASE)
+            return (match is None, int(match.group(1)) if match else 0, filename)
+        images.sort(key=sort_key)
         pdf_path = os.path.join(arrangement_dir_path, f"{instrument}.pdf")
-        if os.path.exists(pdf_path): continue
+        if os.path.exists(pdf_path):
+            continue
         
         image_objects = []
         try:
             for i, image_name in enumerate(images):
                 img_path = os.path.join(instrument_path, image_name)
                 img = Image.open(img_path).convert('RGB')
-                if i == 0: first_image = img
-                else: image_objects.append(img)
+                if i == 0:
+                    first_image = img
+                else:
+                    image_objects.append(img)
             first_image.save(pdf_path, save_all=True, append_images=image_objects)
             ui.success(f"Created {os.path.basename(pdf_path)}")
         except Exception as e:
             ui.error(f"Failed to create PDF for {instrument}: {e}")
+        finally:
+            try:
+                for img in image_objects:
+                    img.close()
+                if 'first_image' in locals():
+                    first_image.close()
+            except Exception:
+                pass
 
 def get_path_components(url):
     try:
@@ -117,26 +228,50 @@ def get_instrument_from_filename(filename):
     return match.group(1) if match else "unknown-instrument"
 
 def process_url(url, target_path):
+    normalized = normalize_url(url)
+    if not normalized:
+        ui.error(f"Invalid URL: {url}")
+        return
+    if not is_praisecharts_song_details_url(normalized):
+        ui.error("Unsupported URL. Expected something like 'praisecharts.com/songs/details/...'")
+        return
+    # Redirect heuristic: skip if it collapses to domain root
+    if redirects_to_domain_root(normalized):
+        ui.error(f"URL appears invalid (redirects to domain root): {url}")
+        return
+
     if os.path.exists(target_path):
-        ui.warning(f"Overwriting directory: {os.path.relpath(target_path)}")
-        shutil.rmtree(target_path)
+        try:
+            if os.path.isdir(target_path):
+                ui.warning(f"Overwriting directory: {os.path.relpath(target_path)}")
+                shutil.rmtree(target_path)
+            else:
+                ui.warning(f"A file exists at target path; removing file: {os.path.relpath(target_path)}")
+                os.remove(target_path)
+        except OSError as e:
+            ui.error(f"Failed to clear target path '{target_path}': {e}")
+            return
 
-    options = FirefoxOptions()
-    options.add_argument("--headless")
-    driver = webdriver.Firefox(options=options)
-    wait = WebDriverWait(driver, 10)
-
+    driver = None
     try:
-        driver.get(url)
+        options = FirefoxOptions()
+        # options.add_argument("--headless")
+        driver = webdriver.Firefox(options=options)
+        wait = WebDriverWait(driver, 10)
+
+        driver.get(normalized)
         spinner_selector = (By.CSS_SELECTOR, '.spinner, .loading, .overlay, .app-spinner')
         try:
             wait.until(EC.invisibility_of_element_located(spinner_selector))
         except TimeoutException:
             ui.warning("Spinner did not disappear in time, continuing anyway.")
 
-        preview_container = wait.until(EC.visibility_of_element_located((By.CSS_SELECTOR, 'app-product-sheet-preview')))
+        _ = wait.until(EC.visibility_of_element_located((By.CSS_SELECTOR, 'app-product-sheet-preview')))
         first_image_element = wait.until(EC.visibility_of_element_located((By.CSS_SELECTOR, '.sheet-wrapper:nth-child(1) img')))
         first_image_url = first_image_element.get_attribute('src')
+        if not first_image_url:
+            ui.error("Could not locate first preview image URL.")
+            return
         first_image_filename = os.path.basename(first_image_url.split('?')[0])
         
         instrument = get_instrument_from_filename(first_image_filename)
@@ -144,15 +279,18 @@ def process_url(url, target_path):
 
         while True:
             sheet_wrappers = driver.find_elements(By.CSS_SELECTOR, '.sheet-wrapper')
-            if len(sheet_wrappers) < 2: break
-            
+            if len(sheet_wrappers) < 2:
+                break
             try:
                 second_wrapper = sheet_wrappers[1]
                 second_image_element = second_wrapper.find_element(By.TAG_NAME, 'img')
                 current_image_url = second_image_element.get_attribute('src')
+                if not current_image_url:
+                    break
                 current_image_filename = os.path.basename(current_image_url.split('?')[0])
 
-                if current_image_filename == first_image_filename: break
+                if current_image_filename == first_image_filename:
+                    break
 
                 instrument = get_instrument_from_filename(current_image_filename)
                 download_image(current_image_url, os.path.join(target_path, instrument, current_image_filename))
@@ -160,12 +298,24 @@ def process_url(url, target_path):
                 next_button = second_wrapper.find_element(By.TAG_NAME, 'button')
                 driver.execute_script("arguments[0].click();", next_button)
 
-                WebDriverWait(driver, 2).until(lambda d: d.find_element(By.CSS_SELECTOR, '.sheet-wrapper:nth-child(2) img').get_attribute('src') != current_image_url)
-            except (TimeoutException, NoSuchElementException): break
-            except Exception as e: ui.error(f"Error in loop: {e}"); break
+                WebDriverWait(driver, 3).until(lambda d: d.find_element(By.CSS_SELECTOR, '.sheet-wrapper:nth-child(2) img').get_attribute('src') != current_image_url)
+            except (TimeoutException, NoSuchElementException):
+                break
+            except Exception as e:
+                ui.error(f"Error in loop: {e}")
+                break
+    except (WebDriverException, SessionNotCreatedException) as e:
+        ui.error(f"Browser automation failed: {e}")
+        ui.info("Ensure Firefox and geckodriver are installed and compatible with your Selenium version.")
+    except Exception as e:
+        ui.error(f"Unexpected error during processing: {e}")
     finally:
-        driver.quit()
-        if os.path.exists(target_path):
+        try:
+            if driver is not None:
+                driver.quit()
+        except Exception:
+            pass
+        if os.path.isdir(target_path):
             create_pdfs_from_images(target_path)
 
 def main():
@@ -183,12 +333,48 @@ def main():
         parser.print_help()
         sys.exit(2)
 
+    if args.file and args.url:
+        ui.warning("Both --file and --url provided. The --file list will be processed; the single URL will be ignored.")
+
     if args.file:
         try:
+            if not os.path.exists(args.file):
+                ui.error(f"File not found at {args.file}")
+                sys.exit(1)
+            if os.path.isdir(args.file):
+                ui.error(f"Provided --file is a directory, not a file: {args.file}")
+                sys.exit(1)
+            if not args.file.lower().endswith('.txt'):
+                ui.error(f"Provided --file is not a .txt file: {args.file}")
+                sys.exit(1)
             with open(args.file, 'r', encoding='utf-8') as f:
                 urls = [line.strip() for line in f if line.strip() and not line.strip().startswith('#')]
-        except FileNotFoundError:
-            ui.error(f"File not found at {args.file}"); sys.exit(1)
+        except UnicodeDecodeError as e:
+            ui.error(f"Failed to read file (encoding issue) {args.file}: {e}")
+            sys.exit(1)
+        except OSError as e:
+            ui.error(f"Failed to open file {args.file}: {e}")
+            sys.exit(1)
+
+        # Normalize and keep only praisecharts song details URLs
+        normalized_urls: List[str] = []
+        invalid_urls: List[str] = []
+        for u in urls:
+            nu = normalize_url(u)
+            if nu and is_praisecharts_song_details_url(nu):
+                normalized_urls.append(nu)
+            else:
+                invalid_urls.append(u)
+        if invalid_urls:
+            ui.warning("Some entries are not valid PraiseCharts song URLs and will be skipped:")
+            for bad in invalid_urls[:10]:
+                ui.item('-', bad)
+            if len(invalid_urls) > 10:
+                ui.info(f"... and {len(invalid_urls) - 10} more")
+        if not normalized_urls:
+            ui.warning("No valid URLs to process.")
+            sys.exit(0)
+        urls = normalized_urls
 
         conflicts = {i: (url, get_arrangement_path(url)) for i, url in enumerate(urls) if os.path.exists(get_arrangement_path(url))}
         non_conflicts = [(url, get_arrangement_path(url)) for i, url in enumerate(urls) if i not in conflicts]
@@ -202,19 +388,30 @@ def main():
             
             actions = {'o': ('Overwrite', 'overwritten'), 'n': ('Add number', 'renamed')}
             for key, (text, stat_key) in actions.items():
-                if not conflicts: break
-                user_input = ui.prompt(f"Enter numbers to '{text}' (e.g., '1 2', 'all', or Enter to skip):")
-                if not user_input: continue
-                
-                indices = list(conflicts.keys()) if user_input.lower() == 'all' else [int(n) - 1 for n in user_input.split()]
-                
-                moved = []
+                if not conflicts:
+                    break
+                user_input = safe_prompt(f"Enter numbers to '{text}' (e.g., '1 2', 'all', or Enter to skip):")
+                if not user_input:
+                    continue
+                if user_input.lower() == 'all':
+                    indices = list(conflicts.keys())
+                else:
+                    indices = []
+                    for token in user_input.split():
+                        try:
+                            idx = int(token) - 1
+                            if idx in conflicts:
+                                indices.append(idx)
+                            else:
+                                ui.warning(f"Index out of range: {token}")
+                        except ValueError:
+                            ui.warning(f"Invalid number: {token}")
                 for i in indices:
                     if i in conflicts:
                         url, path = conflicts.pop(i)
                         final_path = find_next_available_dir(path) if key == 'n' else path
-                        tasks.append((url, final_path)); stats[stat_key] += 1
-                        moved.append(i)
+                        tasks.append((url, final_path))
+                        stats[stat_key] += 1
 
         stats['skipped'] = len(conflicts)
         tasks.extend(non_conflicts); stats['new'] += len(non_conflicts)
@@ -228,19 +425,26 @@ def main():
                 ui.error(f"Failed to process {url}: {e}"); stats['errors'] += 1
 
     elif args.url:
-        target_path = get_arrangement_path(args.url)
+        normalized_single = normalize_url(args.url)
+        if not normalized_single:
+            ui.error(f"Invalid URL: {args.url}")
+            sys.exit(2)
+        if not is_praisecharts_song_details_url(normalized_single):
+            ui.error("Unsupported URL. Expected something like 'praisecharts.com/songs/details/...'")
+            sys.exit(2)
+        target_path = get_arrangement_path(normalized_single)
         if os.path.exists(target_path):
-            choice = ui.prompt(f"Directory '{os.path.relpath(target_path)}' exists. [O]verwrite, [N]umber, [S]kip, [Q]uit?").lower()
+            choice = safe_prompt(f"Path '{os.path.relpath(target_path)}' exists. [O]verwrite, [N]umber, [S]kip, [Q]uit?").lower()
             if choice == 'o':
-                process_url(args.url, target_path); stats['overwritten'] += 1
+                process_url(normalized_single, target_path); stats['overwritten'] += 1
             elif choice == 'n':
-                process_url(args.url, find_next_available_dir(target_path)); stats['renamed'] += 1
+                process_url(normalized_single, find_next_available_dir(target_path)); stats['renamed'] += 1
             elif choice == 'q':
                 sys.exit("Operation cancelled.")
             else:
                 ui.info("Skipping."); stats['skipped'] += 1
         else:
-            process_url(args.url, target_path); stats['new'] += 1
+            process_url(normalized_single, target_path); stats['new'] += 1
 
     ui.header("Summary")
     ui.success(f"New downloads: {stats['new']}")
