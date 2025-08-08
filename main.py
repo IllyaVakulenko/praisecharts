@@ -171,29 +171,19 @@ def process_url(url, target_path):
 def main():
     parser = argparse.ArgumentParser(description="Downloads sheet music from PraiseCharts.")
     parser.add_argument('--debug', action='store_true', help="Enable detailed debug logging.")
-    group = parser.add_mutually_exclusive_group(required=True)
-    group.add_argument('--url', help="A single URL to download.")
-    group.add_argument('--file', help="A file containing a list of URLs.")
+    parser.add_argument('url', nargs='?', help="A single URL to download (default mode).")
+    parser.add_argument('--url', dest='url', help="A single URL to download (same as positional).")
+    parser.add_argument('--file', help="A file containing a list of URLs.")
     args = parser.parse_args()
 
     setup_logging(args.debug)
     stats = {'new': 0, 'overwritten': 0, 'renamed': 0, 'skipped': 0, 'errors': 0}
 
-    if args.url:
-        target_path = get_arrangement_path(args.url)
-        if os.path.exists(target_path):
-            choice = ui.prompt(f"Directory '{os.path.relpath(target_path)}' exists. [O]verwrite, [N]umber, [S]kip, [Q]uit?").lower()
-            if choice == 'o':
-                process_url(args.url, target_path); stats['overwritten'] += 1
-            elif choice == 'n':
-                process_url(args.url, find_next_available_dir(target_path)); stats['renamed'] += 1
-            elif choice == 'q':
-                sys.exit("Operation cancelled.")
-            else:
-                ui.info("Skipping."); stats['skipped'] += 1
-        else:
-            process_url(args.url, target_path); stats['new'] += 1
-    elif args.file:
+    if not args.file and not args.url:
+        parser.print_help()
+        sys.exit(2)
+
+    if args.file:
         try:
             with open(args.file, 'r', encoding='utf-8') as f:
                 urls = [line.strip() for line in f if line.strip() and not line.strip().startswith('#')]
@@ -236,7 +226,22 @@ def main():
                 process_url(url, path)
             except Exception as e:
                 ui.error(f"Failed to process {url}: {e}"); stats['errors'] += 1
-    
+
+    elif args.url:
+        target_path = get_arrangement_path(args.url)
+        if os.path.exists(target_path):
+            choice = ui.prompt(f"Directory '{os.path.relpath(target_path)}' exists. [O]verwrite, [N]umber, [S]kip, [Q]uit?").lower()
+            if choice == 'o':
+                process_url(args.url, target_path); stats['overwritten'] += 1
+            elif choice == 'n':
+                process_url(args.url, find_next_available_dir(target_path)); stats['renamed'] += 1
+            elif choice == 'q':
+                sys.exit("Operation cancelled.")
+            else:
+                ui.info("Skipping."); stats['skipped'] += 1
+        else:
+            process_url(args.url, target_path); stats['new'] += 1
+
     ui.header("Summary")
     ui.success(f"New downloads: {stats['new']}")
     ui.info(f"Overwritten: {stats['overwritten']}")
