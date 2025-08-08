@@ -2,6 +2,7 @@ import os
 import sys
 import re
 import time
+import argparse
 import requests
 from urllib.parse import urlparse
 from selenium import webdriver
@@ -111,11 +112,8 @@ def get_instrument_from_filename(filename):
         return match.group(1)
     return "unknown-instrument"
 
-def main():
-    if len(sys.argv) < 2:
-        print("Будь ласка, вкажіть URL як аргумент."); sys.exit(1)
-    url = sys.argv[1]
-
+def process_url(url):
+    """Виконує повний цикл завантаження та обробки для одного URL."""
     song_slug, arrangement_slug = get_path_components(url)
     
     song_dir = os.path.join(DOWNLOAD_DIR, song_slug)
@@ -137,7 +135,7 @@ def main():
         driver.get(url)
 
         try:
-            cookie_button = WebDriverWait(driver, 5).until(EC.element_to_be_clickable((By.XPATH, "//button[contains(text(), 'Accept') or contains(text(), 'Agree')] ")))
+            cookie_button = WebDriverWait(driver, 5).until(EC.element_to_be_clickable((By.XPATH, "//button[contains(text(), 'Accept') or contains(text(), 'Agree')]")))
             print("Знайдено кнопку згоди на cookie. Натискаємо..."); cookie_button.click(); time.sleep(2)
         except TimeoutException:
             print("Кнопку згоди на cookie не знайдено. Продовжуємо.")
@@ -192,15 +190,57 @@ def main():
                 print(f"Виникла неочікувана помилка: {e}"); break
                 
     except TimeoutException:
-        print("Час очікування елемента вийшов. Перевірте селектори, URL або CAPTCHA.")
+        print(f"Час очікування елемента вийшов для URL: {url}")
     except Exception as e:
-        print(f"Виникла неочікувана помилка: {e}")
+        print(f"Виникла неочікувана помилка для URL {url}: {e}")
     finally:
         print("Закриваємо браузер.")
         driver.quit()
         if 'session_dir' in locals() and os.path.exists(session_dir):
             create_pdfs_from_images(session_dir)
-        print("\nРоботу завершено.")
+
+def main():
+    """Головна функція для розбору аргументів та запуску обробки."""
+    parser = argparse.ArgumentParser(
+        description="Завантажує партитури з PraiseCharts.",
+        formatter_class=argparse.RawTextHelpFormatter
+    )
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument(
+        '--url', 
+        help="Одне посилання для завантаження."
+    )
+    group.add_argument(
+        '--file', 
+        help="Файл з переліком посилань (одне посилання на рядок).\nРядки, що починаються з #, ігноруються."
+    )
+
+    args = parser.parse_args()
+
+    if args.url:
+        process_url(args.url)
+    elif args.file:
+        try:
+            with open(args.file, 'r', encoding='utf-8') as f:
+                urls = [line.strip() for line in f if line.strip() and not line.strip().startswith('#')]
+            
+            total_urls = len(urls)
+            print(f"Знайдено {total_urls} посилань у файлі {args.file}.")
+
+            for i, url in enumerate(urls):
+                print(f"\n--- Обробка посилання {i+1}/{total_urls}: {url} ---")
+                try:
+                    process_url(url)
+                except Exception as e:
+                    print(f"!! Не вдалося обробити {url}: {e}")
+                print(f"--- Завершено обробку посилання {i+1}/{total_urls} ---")
+
+        except FileNotFoundError:
+            print(f"Помилка: файл не знайдено за шляхом {args.file}")
+        except Exception as e:
+            print(f"Виникла помилка при читанні файлу: {e}")
+    
+    print("\nРоботу завершено.")
 
 if __name__ == '__main__':
     main()
