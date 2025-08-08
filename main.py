@@ -47,33 +47,28 @@ def main():
     options = FirefoxOptions()
     # options.add_argument("--headless")
     driver = webdriver.Firefox(options=options)
+    wait = WebDriverWait(driver, 20) # Збільшимо час очікування для надійності
 
     try:
         print(f"Переходимо на сторінку: {url}")
         driver.get(url)
 
-        # Спроба закрити банер cookie, якщо він є
         try:
             cookie_button = WebDriverWait(driver, 5).until(
                 EC.element_to_be_clickable((By.XPATH, "//button[contains(text(), 'Accept') or contains(text(), 'Agree')]"))
             )
             print("Знайдено кнопку згоди на cookie. Натискаємо...")
             cookie_button.click()
-            time.sleep(2) # Даємо час банеру зникнути
+            time.sleep(2)
         except TimeoutException:
             print("Кнопку згоди на cookie не знайдено. Продовжуємо.")
 
         print("Очікування завантаження контейнера попереднього перегляду...")
-        wait = WebDriverWait(driver, 20)
-        
-        # ВИПРАВЛЕНО: Використовуємо ваш селектор, який спрацював
         preview_container = wait.until(
             EC.visibility_of_element_located((By.CSS_SELECTOR, 'app-product-sheet-preview'))
         )
         print("Контейнер знайдено.")
 
-        wait.until(EC.visibility_of_all_elements_located((By.CSS_SELECTOR, '.sheet-wrapper')))
-        
         first_image_element = wait.until(
             EC.visibility_of_element_located((By.CSS_SELECTOR, '.sheet-wrapper:nth-child(1) img'))
         )
@@ -85,55 +80,53 @@ def main():
         first_image_filename = os.path.basename(first_image_url.split('?')[0])
         download_image(first_image_url, first_image_filename)
 
-        sheet_wrappers = preview_container.find_elements(By.CSS_SELECTOR, '.sheet-wrapper')
-        if len(sheet_wrappers) < 2:
-            print("Знайдено тільки один аркуш, завантаження завершено.")
-            return
-        
         # Головний цикл
         while True:
-            # Знаходимо другий wrapper і зображення в ньому
-            second_image_element = wait.until(
-                EC.visibility_of_element_located((By.CSS_SELECTOR, '.sheet-wrapper:nth-child(2) img'))
-            )
-            current_image_url = second_image_element.get_attribute('src')
-            if not current_image_url:
-                print("Не вдалося отримати URL поточного зображення. Завершуємо.")
+            # Перевіряємо наявність другого wrapper
+            sheet_wrappers = preview_container.find_elements(By.CSS_SELECTOR, '.sheet-wrapper')
+            if len(sheet_wrappers) < 2:
+                print("Другий .sheet-wrapper не знайдено. Завантаження завершено.")
                 break
-
-            current_image_filename = os.path.basename(current_image_url.split('?')[0])
-
-            if current_image_filename == first_image_filename:
-                print("Повернулися до першого зображення. Завантаження завершено.")
-                break
-
-            download_image(current_image_url, current_image_filename)
-
-            # ВИПРАВЛЕНО: Шукаємо кнопки всередині другого sheet-wrapper
+            
             try:
-                sheet_wrappers = preview_container.find_elements(By.CSS_SELECTOR, '.sheet-wrapper')
+                # Знаходимо елементи всередині другого wrapper
                 second_wrapper = sheet_wrappers[1]
-                
-                # Знаходимо першу кнопку всередині цього блоку
+                second_image_element = second_wrapper.find_element(By.TAG_NAME, 'img')
+                current_image_url = second_image_element.get_attribute('src')
+
+                if not current_image_url:
+                    print("Не вдалося отримати URL поточного зображення. Завершуємо.")
+                    break
+
+                current_image_filename = os.path.basename(current_image_url.split('?')[0])
+                if current_image_filename == first_image_filename:
+                    print("Повернулися до першого зображення. Завантаження завершено.")
+                    break
+
+                download_image(current_image_url, current_image_filename)
+
+                # Натискаємо кнопку
                 next_button = second_wrapper.find_element(By.TAG_NAME, 'button')
-                
                 driver.execute_script("arguments[0].click();", next_button)
                 print("Натиснуто кнопку 'Next Page'.")
 
-                # Очікуємо оновлення src зображення
+                # **ВИПРАВЛЕНО: Чекаємо, поки URL зображення зміниться**
+                # Це найнадійніший спосіб переконатися, що контент оновився.
                 wait.until(
                     lambda d: d.find_element(By.CSS_SELECTOR, '.sheet-wrapper:nth-child(2) img').get_attribute('src') != current_image_url
                 )
                 print("Зображення оновилося.")
 
             except TimeoutException:
-                print("Не вдалося дочекатися оновлення зображення після кліку. Можливо, це кінець.")
+                # Якщо URL не змінився за відведений час, ймовірно, це кінець
+                print("Не вдалося дочекатися оновлення зображення після кліку. Завершуємо.")
                 break
             except NoSuchElementException:
-                print("Кнопку 'Next Page' більше не знайдено у другому блоці. Завершуємо.")
+                # Якщо після кліку зник другий wrapper, це теж кінець
+                print("Наступний елемент не знайдено. Завантаження завершено.")
                 break
             except Exception as e:
-                print(f"Виникла помилка під час кліку або очікування: {e}")
+                print(f"Виникла неочікувана помилка: {e}")
                 break
                 
     except TimeoutException:
