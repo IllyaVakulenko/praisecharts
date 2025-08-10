@@ -23,6 +23,7 @@ try:
     )
     from PIL import Image
     from colorama import init, Fore, Style
+    import questionary
 except ImportError:
     print("Error: Required libraries are not installed.")
     print("Please run: pip install -r requirements.txt")
@@ -40,13 +41,13 @@ class ConsoleUI:
         print(f"{Fore.CYAN}>> {message}")
 
     def success(self, message):
-        print(f"{Fore.GREEN}✔ {message}")
+        print(f"{Fore.GREEN}✔  {message}")
 
     def warning(self, message):
-        print(f"{Fore.YELLOW}⚠ {message}")
+        print(f"{Fore.YELLOW}⚠  {message}")
 
     def error(self, message):
-        print(f"{Fore.RED}✖ {message}")
+        print(f"{Fore.RED}✖  {message}")
 
     def prompt(self, question):
         return input(f"{Fore.YELLOW}? {question} ")
@@ -171,6 +172,61 @@ def safe_prompt(question: str, default: str = "") -> str:
     except (EOFError, KeyboardInterrupt):
         ui.warning("No input available; using default response.")
         return default
+
+def _is_tty() -> bool:
+    try:
+        return sys.stdin.isatty() and sys.stdout.isatty()
+    except Exception:
+        return False
+
+def interactive_flags_prompt(args) -> None:
+    """Show interactive 'quick settings' with checkboxes in TTY (English-only).
+    Falls back to simple numeric selection when TTY is unavailable.
+    Mutates args in-place: args.debug, args.headed, args.outdir
+    """
+    if _is_tty():
+        choices = [
+            questionary.Choice("Show browser window (disable headless)", "headed", checked=bool(getattr(args, 'headed', False))),
+            questionary.Choice("Enable debug logging", "debug", checked=bool(getattr(args, 'debug', False))),
+            questionary.Choice("Change output directory", "outdir", checked=False),
+        ]
+        selected = questionary.checkbox("Quick settings:", choices=choices).ask() or []
+        if "debug" in selected:
+            args.debug = True
+        if "headed" in selected:
+            args.headed = True
+        if "outdir" in selected:
+            new_outdir = questionary.text("Output directory:", default=(args.outdir or "charts")).ask()
+            if new_outdir:
+                args.outdir = new_outdir
+    else:
+        ui.info("Quick settings (enter numbers separated by space, or press Enter to skip):")
+        ui.item(1, "Show browser window (disable headless)")
+        ui.item(2, "Enable debug logging")
+        ui.item(3, f"Change output directory (current: {getattr(args, 'outdir', 'charts')})")
+        raw = safe_prompt("Your choice:").strip()
+        try:
+            nums = {int(t) for t in raw.split() if t.isdigit()}
+        except Exception:
+            nums = set()
+        if 1 in nums:
+            args.headed = True
+        if 2 in nums:
+            args.debug = True
+        if 3 in nums:
+            new_outdir = safe_prompt("Output directory:").strip()
+            if new_outdir:
+                args.outdir = new_outdir
+
+def _checkbox_select_indices(title: str, index_to_label: dict[int, str]) -> list[int] | None:
+    """If questionary/TTY available, show checkbox list and return selected indices; else None."""
+    if not (_is_tty() and index_to_label):
+        return None
+    # Sort by index for stable display
+    items = sorted(index_to_label.items(), key=lambda kv: kv[0])
+    choices = [questionary.Choice(f"{idx+1}. {label}", idx) for idx, label in items]
+    selected = questionary.checkbox(title, choices=choices).ask()
+    return list(selected or [])
 
 def classify_user_input(raw: str) -> tuple[str | None, str | None]:
     """Classify user input prioritizing files first (simpler):
@@ -413,13 +469,6 @@ def main():
     parser.add_argument('--file', help="A file containing a list of URLs.")
     args = parser.parse_args()
 
-    setup_logging(args.debug)
-    stats = {'new': 0, 'overwritten': 0, 'renamed': 0, 'skipped': 0, 'errors': 0}
-
-    # Apply CLI configuration
-    DOWNLOAD_DIR = args.outdir or DOWNLOAD_DIR
-    BROWSER_HEADLESS = not bool(args.headed)
-
     # Reclassify positional input: prefer file if it's a .txt or existing file
     if args.url and not args.file:
         kind, value = classify_user_input(args.url)
@@ -434,6 +483,8 @@ def main():
 
     if not args.file and not args.url:
         ui.header("Interactive Mode")
+        # Offer quick settings via checkboxes (English-only)
+        interactive_flags_prompt(args)
         user_inp = safe_prompt("Enter PraiseCharts URL or path to a file with URLs:").strip()
         kind, value = classify_user_input(user_inp)
         if kind == "url":
@@ -444,6 +495,14 @@ def main():
             ui.error(value or "Unable to determine input type.")
             parser.print_help()
             sys.exit(2)
+
+    # Initialize logging after potential interactive flag changes
+    setup_logging(args.debug)
+    stats = {'new': 0, 'overwritten': 0, 'renamed': 0, 'skipped': 0, 'errors': 0}
+
+    # Apply CLI configuration
+    DOWNLOAD_DIR = args.outdir or DOWNLOAD_DIR
+    BROWSER_HEADLESS = not bool(args.headed)
 
     if args.file and args.url:
         ui.warning("Both --file and --url provided. The --file list will be processed; the single URL will be ignored.")
@@ -498,33 +557,74 @@ def main():
             ui.warning("Found existing arrangements:")
             for i, (_, path) in conflicts.items():
                 ui.item(i + 1, os.path.relpath(path))
-            
-            actions = {'o': ('Overwrite', 'overwritten'), 'n': ('Add number', 'renamed')}
-            for key, (text, stat_key) in actions.items():
-                if not conflicts:
-                    break
-                user_input = safe_prompt(f"Enter numbers to '{text}' (e.g., '1 2', 'all', or Enter to skip):")
-                if not user_input:
-                    continue
-                if user_input.lower() == 'all':
-                    indices = list(conflicts.keys())
-                else:
-                    indices = []
-                    for token in user_input.split():
-                        try:
-                            idx = int(token) - 1
-                            if idx in conflicts:
-                                indices.append(idx)
-                            else:
-                                ui.warning(f"Index out of range: {token}")
-                        except ValueError:
-                            ui.warning(f"Invalid number: {token}")
-                for i in indices:
+            # Prefer checkbox selection when available
+            selected = _checkbox_select_indices(
+                title="Select items to Overwrite:",
+                index_to_label={i: os.path.relpath(p) for i, (_, p) in conflicts.items()}
+            )
+            if selected is not None and selected:
+                for i in selected:
                     if i in conflicts:
                         url, path = conflicts.pop(i)
-                        final_path = find_next_available_dir(path) if key == 'n' else path
-                        tasks.append((url, final_path))
-                        stats[stat_key] += 1
+                        tasks.append((url, path))
+                        stats['overwritten'] += 1
+            elif selected is None:
+                # Fallback to numeric input
+                user_input = safe_prompt("Enter numbers to 'Overwrite' (e.g., '1 2', 'all', or Enter to skip):")
+                if user_input:
+                    if user_input.lower() == 'all':
+                        indices = list(conflicts.keys())
+                    else:
+                        indices = []
+                        for token in user_input.split():
+                            try:
+                                idx = int(token) - 1
+                                if idx in conflicts:
+                                    indices.append(idx)
+                                else:
+                                    ui.warning(f"Index out of range: {token}")
+                            except ValueError:
+                                ui.warning(f"Invalid number: {token}")
+                    for i in indices:
+                        if i in conflicts:
+                            url, path = conflicts.pop(i)
+                            tasks.append((url, path))
+                            stats['overwritten'] += 1
+
+            if conflicts:
+                selected_n = _checkbox_select_indices(
+                    title="Select items to save into numbered folders:",
+                    index_to_label={i: os.path.relpath(p) for i, (_, p) in conflicts.items()}
+                )
+                if selected_n is not None and selected_n:
+                    for i in selected_n:
+                        if i in conflicts:
+                            url, path = conflicts.pop(i)
+                            final_path = find_next_available_dir(path)
+                            tasks.append((url, final_path))
+                            stats['renamed'] += 1
+                elif selected_n is None:
+                    user_input = safe_prompt("Enter numbers to 'Add number' (e.g., '1 2', 'all', or Enter to skip):")
+                    if user_input:
+                        if user_input.lower() == 'all':
+                            indices = list(conflicts.keys())
+                        else:
+                            indices = []
+                            for token in user_input.split():
+                                try:
+                                    idx = int(token) - 1
+                                    if idx in conflicts:
+                                        indices.append(idx)
+                                    else:
+                                        ui.warning(f"Index out of range: {token}")
+                                except ValueError:
+                                    ui.warning(f"Invalid number: {token}")
+                        for i in indices:
+                            if i in conflicts:
+                                url, path = conflicts.pop(i)
+                                final_path = find_next_available_dir(path)
+                                tasks.append((url, final_path))
+                                stats['renamed'] += 1
 
         stats['skipped'] = len(conflicts)
         tasks.extend(non_conflicts); stats['new'] += len(non_conflicts)

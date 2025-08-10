@@ -96,13 +96,18 @@ The first time you run it, Firefox will open while the tool automatically naviga
 ### Usage
 
 #### Interactive Mode
-Run without parameters and the tool will ask for input. It accepts either a PraiseCharts URL or a path to a `.txt` file:
+Run without parameters and the tool will offer quick checkboxes (English-only) for common options and then ask for input. It accepts either a PraiseCharts URL or a path to a `.txt` file:
 
 ```sh
 python main.py
 # or the packaged exe on Windows
 ./dist/praisecharts-downloader.exe
 ```
+
+Quick settings shown as checkboxes:
+- Show browser window (disable headless)
+- Enable debug logging
+- Change output directory
 
 Input rules:
 - If input ends with `.txt` or points to an existing file, it is treated as a file list
@@ -147,7 +152,7 @@ python main.py --file temp/links.txt
 python main.py temp/links.txt
 ```
 
-If any target arrangement folders already exist, you’ll get a “Conflict Resolution” section listing them with numbers. You can choose which ones to overwrite and which ones to “add number” (rename), or skip the rest by pressing Enter. Details in [Interactive Prompts Explained](#interactive-prompts-explained).
+If any target arrangement folders already exist, you’ll get a “Conflict Resolution” section listing them with numbers. On capable terminals, you can select conflicts using checkboxes; otherwise enter indices as text. Choose which ones to overwrite and which ones to “add number” (rename), or skip the rest by pressing Enter. Details in [Interactive Prompts Explained](#interactive-prompts-explained).
 
 
 #### CLI Help
@@ -202,11 +207,11 @@ Conflicts occur when a target arrangement directory already exists. The tool off
 - [Q]uit: Abort the program immediately.
 
 Notes:
-- Inputs are case‑insensitive; only the first character is used.
+- Inputs are case‑insensitive; only the first character is used in single‑URL prompts.
 - In single‑URL mode, entering anything other than `O`, `N`, or `Q` is treated as Skip.
-- In batch mode, conflict resolution happens in two passes:
-  1) You’re asked which conflicted items to Overwrite (enter indices like `1 3 5`, type `all` for all, or press Enter to skip this action)
-  2) You’re asked which remaining conflicted items to Number
+- In batch mode, conflict resolution happens in two passes. On terminals that support checkboxes, you’ll select items interactively. Otherwise:
+  1) Enter indices to Overwrite (e.g., `1 3 5`, or `all`)
+  2) Enter indices to Number (rename)
   Any conflicts not selected in those two steps are skipped.
 
 
