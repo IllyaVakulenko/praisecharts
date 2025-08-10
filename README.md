@@ -267,7 +267,17 @@ Work complete.
 ## For Contributors
 
 ### Project Structure
-- `main.py`: CLI entrypoint and the complete implementation
+- `main.py`: Thin entrypoint that calls the package CLI
+- `praisecharts/`: Python package with modules
+  - `__main__.py`: allows `python -m praisecharts`
+  - `cli.py`: CLI parsing and orchestration
+  - `ui.py`: console UI helpers
+  - `config.py`: configuration and logging setup
+  - `urls.py`: URL normalization and validation
+  - `http.py`: shared HTTP session and downloads
+  - `paths.py`: path and filename helpers
+  - `pdf.py`: assemble instrument PDFs
+  - `scraper.py`: Selenium-driven page scraper
 - `charts/`: Default output directory for downloads
 - `temp/links.txt`: Example input list for batch mode
 - `requirements.txt`: Python dependency pins
@@ -303,7 +313,7 @@ python main.py --debug --headed --outdir charts --url https://www.praisecharts.c
 
 
 ### Code Overview
-High‑level flow in `main.py`:
+High‑level flow in the package:
 - URL handling: normalization and validation to accept only PraiseCharts song details URLs
 - Single vs batch: `--url`/positional vs `--file` mode (batch reads `.txt`, ignores comments and blanks)
 - Conflict handling:
